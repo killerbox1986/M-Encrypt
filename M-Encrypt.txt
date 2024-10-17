@@ -1,0 +1,252 @@
+import java.io.*;
+import java.nio.file.*;
+import java.nio.channels.FileChannel;
+import java.nio.channels.FileLock;
+import java.security.*;
+import java.security.spec.InvalidKeySpecException;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+import org.bouncycastle.jce.provider.BouncyCastleProvider;
+import org.bouncycastle.crypto.generators.Argon2BytesGenerator;
+import org.bouncycastle.crypto.params.Argon2Parameters;
+import org.bouncycastle.util.Arrays;
+import java.util.Base64;
+import java.util.regex.Pattern;
+
+// Custom Exceptions
+class SaltFileNotFoundException extends Exception {
+    public SaltFileNotFoundException(String message) {
+        super(message);
+    }
+}
+
+class DecryptionFailedException extends Exception {
+    public DecryptionFailedException(String message) {
+        super(message);
+    }
+}
+
+// Main Class
+public class MCipher {
+
+    private static final int SALT_SIZE = 16; // Salt size of 16 bytes
+    private static final String SALT_FILE = "salt.bin"; // Dedicated salt file path
+    private static final String ENCRYPTED_FILE = "encrypted.txt"; // Encrypted file path
+    private static final String COMMON_PASSWORDS_FILE = "common_passwords.txt"; // Common passwords for checks
+
+    static {
+        Security.addProvider(new BouncyCastleProvider());
+    }
+
+    // Method to derive a key from password using Argon2 with parameter optimization
+    public static byte[] deriveKey(String password, byte[] salt) {
+        Argon2Parameters.Builder params = new Argon2Parameters.Builder(Argon2Parameters.ARGON2_id);
+        params.withMemoryAsKB(65536) // Set memory usage (64MB)
+              .withIterations(4) // Set the number of iterations
+              .withParallelism(2) // Set the number of threads to use for better performance
+              .withSalt(salt);
+
+        Argon2BytesGenerator generator = new Argon2BytesGenerator();
+        generator.init(params.build());
+
+        byte[] key = new byte[32]; // 256 bits for PQC, adjust based on the algorithm you choose
+        generator.generateBytes(password.getBytes(), key);
+
+        return key;
+    }
+
+    // Method to generate a random salt
+    public static byte[] generateSalt() {
+        byte[] salt = new byte[SALT_SIZE];
+        new SecureRandom().nextBytes(salt); // Secure random for cryptographic use
+        return salt;
+    }
+
+    // Method to securely store the salt in a dedicated file with restricted permissions
+    public static void writeSaltToFile(byte[] salt) throws IOException {
+        try (FileOutputStream fos = new FileOutputStream(SALT_FILE)) {
+            fos.write(salt);
+        }
+        // Set file permissions (Unix-based systems)
+        new File(SALT_FILE).setReadable(false);
+        new File(SALT_FILE).setWritable(false);
+        new File(SALT_FILE).setExecutable(false);
+    }
+
+    // Method to read salt from a file
+    public static byte[] readSaltFromFile() throws SaltFileNotFoundException, IOException {
+        byte[] salt = new byte[SALT_SIZE];
+        if (!Files.exists(Paths.get(SALT_FILE))) {
+            throw new SaltFileNotFoundException("Salt file does not exist.");
+        }
+
+        try (FileInputStream fis = new FileInputStream(SALT_FILE)) {
+            if (fis.read(salt) != salt.length) {
+                throw new IOException("Error reading salt file.");
+            }
+        }
+        return salt;
+    }
+
+    // Method to read plaintext from a file
+    public static byte[] readPlaintextFromFile(String filePath) throws IOException {
+        if (!Files.exists(Paths.get(filePath))) {
+            throw new IOException("Plaintext file does not exist.");
+        }
+
+        File file = new File(filePath);
+        if (file.length() == 0) {
+            throw new IOException("Plaintext file is empty.");
+        }
+
+        byte[] data = new byte[(int) file.length()];
+        try (FileInputStream fis = new FileInputStream(file)) {
+            if (fis.read(data) != data.length) {
+                throw new IOException("Error reading plaintext file.");
+            }
+        }
+        return data;
+    }
+
+    // Write encrypted data to a file using atomic operations
+    public static void writeEncryptedToFile(String filePath, byte[] encryptedData) throws IOException {
+        String tempFilePath = filePath + ".tmp";
+        try (FileOutputStream fos = new FileOutputStream(tempFilePath);
+             FileChannel channel = fos.getChannel();
+             FileLock lock = channel.lock()) {
+            fos.write(encryptedData);
+        }
+        // Rename temp file to actual file
+        new File(tempFilePath).renameTo(new File(filePath));
+    }
+
+    // Securely delete a file (Overwrite and delete)
+    public static void secureDelete(File file) throws IOException {
+        if (file.exists()) {
+            // Overwrite with zeros before deletion
+            new Random().nextBytes(new byte[(int) file.length()]);
+            Files.delete(file.toPath());
+        }
+    }
+
+    // Encrypt plaintext with a hypothetical post-quantum algorithm
+    public static byte[] encrypt(byte[] plaintext, PublicKey publicKey) throws Exception {
+        // Post-Quantum Encryption logic using a hypothetical library
+        // Replace this with your PQC library's encryption method
+        return PostQuantumCrypto.encrypt(plaintext, publicKey); // Hypothetical call
+    }
+
+    // Decrypt ciphertext with a hypothetical post-quantum algorithm
+    public static byte[] decrypt(byte[] ciphertext, PrivateKey privateKey) throws DecryptionFailedException {
+        // Post-Quantum Decryption logic using a hypothetical library
+        // Replace this with your PQC library's decryption method
+        byte[] decryptedData = PostQuantumCrypto.decrypt(ciphertext, privateKey); // Hypothetical call
+        if (decryptedData == null) {
+            throw new DecryptionFailedException("Decryption failed.");
+        }
+        return decryptedData;
+    }
+
+    // Validate password strength with detailed feedback
+    public static PasswordStrength validatePasswordStrength(String password) {
+        int score = 0;
+        StringBuilder suggestions = new StringBuilder();
+
+        // Common password patterns check
+        String[] commonPasswords = {"password123", "qwerty", "123456", "letmein", "admin", "welcome"};
+        for (String common : commonPasswords) {
+            if (password.toLowerCase().contains(common)) {
+                suggestions.append("Avoid common password patterns like '").append(common).append("'. ");
+                break;
+            }
+        }
+
+        // Regular expression checks for weak patterns
+        if (Pattern.compile("^(.)\\1{2,}$").matcher(password).find()) {
+            suggestions.append("Avoid repeating characters. ");
+        }
+
+        if (password.length() >= 12) score++;
+        if (password.matches(".*[A-Z].*")) score++;
+        if (password.matches(".*[a-z].*")) score++;
+        if (password.matches(".*[0-9].*")) score++;
+        if (password.matches(".*[@#$%^&+=].*")) score++;
+
+        // Calculate entropy
+        double entropy = calculateEntropy(password);
+        if (entropy < 40) {
+            suggestions.append("Consider using a longer or more complex password. ");
+        }
+
+        // Provide suggestions for improvement
+        if (score < 4) {
+            if (password.length() < 12) {
+                suggestions.append("Add at least ").append(12 - password.length()).append(" more characters. ");
+            }
+            if (!password.matches(".*[@#$%^&+=].*")) {
+                suggestions.append("Include at least one special character. ");
+            }
+        }
+
+        return new PasswordStrength(score, suggestions.toString());
+    }
+
+    // Calculate password entropy
+    private static double calculateEntropy(String password) {
+        int uniqueChars = (int) password.chars().distinct().count();
+        return password.length() * Math.log(uniqueChars) / Math.log(2); // Entropy in bits
+    }
+
+    public static void main(String[] args) {
+        try {
+            // Prompt user for password securely
+            Console console = System.console();
+            if (console == null) {
+                System.err.println("No console available. Use a terminal.");
+                return;
+            }
+
+            char[] passwordChars = console.readPassword("Enter password: ");
+            String password = new String(passwordChars);
+
+            // Validate password strength
+            PasswordStrength strength = validatePasswordStrength(password);
+            System.out.println("Password strength score: " + strength.score);
+            if (!strength.suggestions.isEmpty()) {
+                System.out.println("Suggestions for improvement: " + strength.suggestions);
+            }
+
+            // Generate salt and derive key
+            byte[] salt = generateSalt();
+            writeSaltToFile(salt); // Store salt in a file
+            byte[] key = deriveKey(password, salt); // Derive key from password
+
+            // Read plaintext from file
+            byte[] plaintext = readPlaintextFromFile("plaintext.txt");
+            System.out.println("Plaintext read from file.");
+
+            // Encrypt plaintext with associated data (using PQC)
+            PublicKey publicKey = PostQuantumCrypto.generatePublicKey(); // Hypothetical public key generation
+            byte[] encryptedData = encrypt(plaintext, publicKey);
+            writeEncryptedToFile(ENCRYPTED_FILE, encryptedData);
+            System.out.println("Encryption successful. Encrypted data written to file.");
+
+            // Securely delete plaintext file
+            secureDelete(new File("plaintext.txt"));
+            System.out.println("Plaintext file securely deleted.");
+        } catch (Exception e) {
+            System.err.println("Error: " + e.getMessage());
+        }
+    }
+
+    // Inner class to hold password strength details
+    static class PasswordStrength {
+        int score;
+        String suggestions;
+
+        PasswordStrength(int score, String suggestions) {
+            this.score = score;
+            this.suggestions = suggestions;
+        }
+    }
+}
